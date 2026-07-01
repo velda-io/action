@@ -1,0 +1,45 @@
+name: Manual Action Test
+
+"on":
+  workflow_dispatch:
+    inputs:
+      api_server:
+        description: "Velda API server host"
+        required: false
+        default: "velda.cloud"
+      pool:
+        description: "Task pool"
+        required: false
+        default: "shell"
+      instance_name:
+        description: "Target instance name"
+        required: false
+        default: "githubaction-test"
+      run_live:
+        description: "If false, run dry-run validation only"
+        required: false
+        default: "false"
+
+jobs:
+  script-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run script mode
+        id: script
+        uses: ./
+        with:
+          api-token: ${{ secrets.VELDA_API_TOKEN }}
+          api-server: ${{ inputs.api_server }}
+          pool: ${{ inputs.pool }}
+          instance-name: ${{ inputs.instance_name }}
+          login-user: user
+          dry-run: ${{ inputs.run_live == 'true' && 'false' || 'true' }}
+          script: |
+            echo "manual workflow script-mode test"
+            uname -a
+      - name: Show script mode output
+        run: |
+          echo "task-id: ${{ steps.script.outputs.task-id }}"
+          echo "instance-id: ${{ steps.script.outputs.instance-id }}"
+

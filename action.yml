@@ -1,0 +1,157 @@
+name: "Velda Run job"
+description: "Submit a Velda Job to run a script on a target instance"
+
+inputs:
+  api-token:
+    description: "Velda API token"
+    required: true
+  api-server:
+    description: "Velda API server host (without scheme)"
+    required: false
+    default: "velda.cloud"
+  pool:
+    description: "Task pool"
+    required: false
+    default: "shell"
+  instance-id:
+    description: "Target instance ID"
+    required: false
+  instance-name:
+    description: "Target instance name"
+    required: false
+  script:
+    description: "Script content to run via sh -c"
+    required: true
+  login-user:
+    description: "Workload login_user"
+    required: false
+    default: "user"
+  stdin:
+    description: "Optional stdin payload"
+    required: false
+    default: ""
+  dry-run:
+    description: "If true, only print payload and skip API call"
+    required: false
+    default: "false"
+
+branding:
+  color: "green"
+  icon: "command"
+
+outputs:
+  task-id:
+    description: "Submitted task ID"
+    value: ${{ steps.submit.outputs.task_id }}
+  instance-id:
+    description: "Resolved target instance ID returned by RunTask"
+    value: ${{ steps.submit.outputs.instance_id }}
+  response-json:
+    description: "Raw RunTask response JSON"
+    value: ${{ steps.submit.outputs.response_json }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: submit
+      shell: bash
+      env:
+        INPUT_API_TOKEN: ${{ inputs.api-token }}
+        INPUT_API_SERVER: ${{ inputs.api-server }}
+        INPUT_POOL: ${{ inputs.pool }}
+        INPUT_INSTANCE_ID: ${{ inputs.instance-id }}
+        INPUT_INSTANCE_NAME: ${{ inputs.instance-name }}
+        INPUT_SCRIPT: ${{ inputs.script }}
+        INPUT_LOGIN_USER: ${{ inputs.login-user }}
+        INPUT_STDIN: ${{ inputs.stdin }}
+        INPUT_DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v curl >/dev/null 2>&1; then
+          echo "curl is required" >&2
+          exit 1
+        fi
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "jq is required" >&2
+          exit 1
+        fi
+
+        if [[ -n "${INPUT_INSTANCE_ID}" && -n "${INPUT_INSTANCE_NAME}" ]]; then
+          echo "Provide only one of instance-id or instance-name" >&2
+          exit 1
+        fi
+        if [[ -z "${INPUT_INSTANCE_ID}" && -z "${INPUT_INSTANCE_NAME}" ]]; then
+          echo "Either instance-id or instance-name is required" >&2
+          exit 1
+        fi
+
+        if [[ -z "${INPUT_SCRIPT}" ]]; then
+          echo "script is required" >&2
+          exit 1
+        fi
+
+        stdin_b64=""
+        if [[ -n "${INPUT_STDIN}" ]]; then
+          stdin_b64="$(printf %s "${INPUT_STDIN}" | base64 | tr -d '\n')"
+        fi
+        workload_json="$(jq -cn \
+          --arg cmd "sh" \
+          --arg script "${INPUT_SCRIPT}" \
+          --arg login_user "${INPUT_LOGIN_USER}" \
+          --arg stdin_payload "${stdin_b64}" \
+          '{command:$cmd,args:["-c",$script],login_user:$login_user,stdin:$stdin_payload}')"
+
+        if [[ -n "${INPUT_INSTANCE_ID}" ]]; then
+          payload="$(jq -cn \
+            --arg pool "${INPUT_POOL}" \
+            --argjson instance_id "${INPUT_INSTANCE_ID}" \
+            --argjson workload "${workload_json}" \
+            '{pool:$pool, instance_id:$instance_id, workload:$workload}')"
+        else
+          payload="$(jq -cn \
+            --arg pool "${INPUT_POOL}" \
+            --arg instance_name "${INPUT_INSTANCE_NAME}" \
+            --argjson workload "${workload_json}" \
+            '{pool:$pool, instance_name:$instance_name, workload:$workload}')"
+        fi
+
+
+        if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+          echo "Dry-run enabled, skipping API call"
+          echo "response_json={}" >> "$GITHUB_OUTPUT"
+          echo "task_id=" >> "$GITHUB_OUTPUT"
+          echo "instance_id=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        api_url="https://${INPUT_API_SERVER}/rest/task/run"
+        response_file="$(mktemp)"
+        status_code="$(curl -sS -o "${response_file}" -w "%{http_code}" \
+          -X POST "${api_url}" \
+          -H "Authorization: Bearer ${INPUT_API_TOKEN}" \
+          -H "Content-Type: application/json" \
+          --data "${payload}")"
+
+        if [[ "${status_code}" -lt 200 || "${status_code}" -ge 300 ]]; then
+          echo "RunTask request failed with status ${status_code}" >&2
+          cat "${response_file}" >&2
+          exit 1
+        fi
+
+        response_json="$(cat "${response_file}")"
+        task_id="$(jq -r '.taskId // empty' <<<"${response_json}")"
+        instance_id="$(jq -r '.instanceId // empty' <<<"${response_json}")"
+
+        if [[ -z "${task_id}" ]]; then
+          echo "RunTask response does not contain task_id" >&2
+          cat "${response_file}" >&2
+          exit 1
+        fi
+
+        echo "response_json=$(jq -c . <<<"${response_json}")" >> "$GITHUB_OUTPUT"
+        echo "task_id=${task_id}" >> "$GITHUB_OUTPUT"
+        echo "instance_id=${instance_id}" >> "$GITHUB_OUTPUT"
+        echo "task_url=https://${INPUT_API_SERVER}/tasks/${task_id}" >> "$GITHUB_OUTPUT"
+
+        echo "RunTask submitted successfully. URL: https://${INPUT_API_SERVER}/tasks/${task_id}"
